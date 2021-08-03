@@ -2,7 +2,9 @@
 # skagmo.com, 2019
 # Needs crcmod (sudo pip install crcmod)
 
-import struct, crcmod
+import struct
+import crcmod
+import datetime
 
 # HDLC constants
 FLAG = '\x7e'
@@ -15,8 +17,8 @@ ESCAPED = 2
 
 # Number of objects in known frames
 OBJECTS_2P5SEC = 1
-OBJECTS_10SEC = 12
-OBJECTS_1HOUR = 17
+OBJECTS_10SEC = 13 # Aidon 6534 (400v 3Ph)
+OBJECTS_1HOUR = 18 # Aidon 6534 (400v 3Ph)
 
 # OBIS types
 TYPE_STRING = 0x0a
@@ -25,115 +27,162 @@ TYPE_INT16 = 0x10
 TYPE_OCTETS = 0x09
 TYPE_UINT16 = 0x12
 
+
 class aidon:
-	def __init__(self, callback):
-		self.state = WAITING
-		self.pkt = ""
-		self.crc_func = crcmod.mkCrcFun(0x11021, rev=True, initCrc=0xffff, xorOut=0x0000)
-		self.callback = callback
+    def __init__(self, callback):
+        self.state = WAITING
+        self.pkt = ""
+        self.crc_func = crcmod.mkCrcFun(0x11021, rev=True, initCrc=0xffff, xorOut=0x0000)
+        self.callback = callback
 
-	# Does a lot of assumptions on Aidon/Hafslund COSEM format
-	# Not a general parser! 
-	def parse(self, pkt):
+    # Does a lot of assumptions on Aidon/Hafslund COSEM format
+    # Not a general parser!
+    def parse(self, pkt):
 
-		# 0,1 frame format
-		# 2 client address
-		# 3,4 server address
-		# 5 control
-		# 6,7 HCS
-		# 8,9,10 LLC
+        # 0,1 frame format
+        # 2 client address
+        # 3,4 server address
+        # 5 control
+        # 6,7 HCS
+        # 8,9,10 LLC
 
-		frame_type = (ord(pkt[0]) & 0xf0) >> 4
-		length = ((ord(pkt[0]) & 0x07) << 8) + ord(pkt[1])
-		object_count = ord(pkt[18])
-		pkt = pkt[19:] # Remove 18 first bytes to start with first object
+        frame_type = (ord(pkt[0]) & 0xf0) >> 4
+        length = ((ord(pkt[0]) & 0x07) << 8) + ord(pkt[1])
+        object_count = ord(pkt[18])
+        # DEBUG
+        # print "----------------------------------------"
+        # print "Object count : " + str(object_count)
+        # print "Frame type: " + str(frame_type)
+        # print "Length: " + str(length)
+        pkt = pkt[19:]  # Remove 18 first bytes to start with first object
 
-		fields = {}
+        fields = {}
 
-		# If number of objects doesn't match any known type, don't continue
-		if not (object_count in [OBJECTS_2P5SEC, OBJECTS_10SEC, OBJECTS_1HOUR]):
-			return
+        # If number of objects doesn't match any known type, don't continue
+        if not (object_count in [OBJECTS_2P5SEC, OBJECTS_10SEC, OBJECTS_1HOUR]):
+            return
 
-		# Fill array with objects
-		data = []
-		for j in range(0, object_count):
-			dtype = ord(pkt[10])
-			
-			if (dtype == TYPE_STRING):
-				size = ord(pkt[11])
-				data.append(pkt[12:12+size])
-				pkt = pkt[12+size:]
+        # Fill array with objects
+        data = []
+        for j in range(0, object_count):
+            dtype = ord(pkt[10])
 
-			elif (dtype == TYPE_UINT32):
-				data.append(struct.unpack(">I", pkt[11:15])[0])
-				pkt = pkt[21:]
+            if dtype == TYPE_STRING:
+                size = ord(pkt[11])
+                data.append(pkt[12:12 + size])
+                pkt = pkt[12 + size:]
 
-			elif (dtype == TYPE_INT16):
-				data.append(struct.unpack(">h", pkt[11:13])[0])
-				pkt = pkt[19:]
+            elif dtype == TYPE_UINT32:
+                # > = big-endian
+                # I = unsigned int // 4 // integer
+                data.append(struct.unpack(">I", pkt[11:15])[0])
+                pkt = pkt[21:]
 
-			elif (dtype == TYPE_OCTETS):
-				size = ord(pkt[11])
-				data.append(pkt[12:12+size])
-				pkt = pkt[12+size:]
+            elif dtype == TYPE_INT16:
+                # > = big-endian
+                # h = short // 2 // integer
+                data.append(struct.unpack(">h", pkt[11:13])[0])
+                pkt = pkt[19:]
 
-			elif (dtype == TYPE_UINT16):
-				data.append(struct.unpack(">H", pkt[11:13])[0])
-				pkt = pkt[19:]
+            elif dtype == TYPE_OCTETS:
+                size = ord(pkt[11])
+                data.append(pkt[12:12 + size])
+                pkt = pkt[12 + size:]
 
-			else:
-				return # Unknown type, cancel
-	
-		# Convert array with generic types to dictionary with sensible keys
-		if (len(data) == OBJECTS_2P5SEC):
-			fields['p_act_in'] = data[0]
-		
-		elif (len(data) == OBJECTS_10SEC) or (len(data) == OBJECTS_1HOUR):
-			fields['version_id'] = data[0]
-			fields['meter_id'] = data[1]
-			fields['meter_type'] = data[2]
-			fields['p_act_in'] = data[3]
-			fields['p_act_out'] = data[4]
-			fields['p_react_in'] = data[5]
-			fields['p_react_out'] = data[6]
-			fields['il1'] = data[7] / 10.0
-			fields['il2'] = data[8] / 10.0
-			fields['ul1'] = data[9] / 10.0
-			fields['ul2'] = data[10] / 10.0
-			fields['ul3'] = data[11] / 10.0
+            elif dtype == TYPE_UINT16:
+                # > = big-endian
+                # H = unsigned short // 2 // integer
+                data.append(struct.unpack(">H", pkt[11:13])[0])
+                pkt = pkt[19:]
 
-			if (len(data) == OBJECTS_1HOUR):
-				fields['energy_act_in'] = data[13] / 100.0
-				fields['energy_act_out'] = data[14] / 100.0
-				fields['energy_react_in'] = data[15] / 100.0
-				fields['energy_react_out'] = data[16] / 100.0
+            else:
+                return  # Unknown type, cancel
 
-		self.callback(fields)
+        # DEBUG
+        # Print data array in incoming order
+        # print data
 
-	# General HDLC decoder
-	def decode(self, c):
-		# Waiting for packet start
-		if (self.state == WAITING): 
-			if (c == FLAG):
-				self.state = DATA
-				self.pkt = ""
+        # Convert array with generic types to dictionary with sensible keys
+        if len(data) == OBJECTS_2P5SEC:
+            fields['p_act_in'] = data[0]
 
-		elif (self.state == DATA):
-			if (c == FLAG):
-				# Minimum length check
-				if (len(self.pkt) >= 19):
-					# Check CRC
-					crc = self.crc_func(self.pkt[:-2])
-					crc ^= 0xffff
-					if (crc == struct.unpack("<H", self.pkt[-2:])[0]):
-						self.parse(self.pkt)
-				self.pkt = ""
-			elif (c == ESCAPE):
-				self.state = ESCAPED
-			else:
-				self.pkt += c
+        elif (len(data) == OBJECTS_10SEC) or (len(data) == OBJECTS_1HOUR):
+            fields['version_id'] = data[0]
+            fields['meter_id'] = data[1]
+            fields['meter_type'] = data[2]
+            fields['p_act_in'] = data[3]
+            fields['p_act_out'] = data[4]
+            fields['p_react_in'] = data[5]
+            fields['p_react_out'] = data[6]
+            fields['il1'] = data[7] / 10.0
+            fields['il2'] = data[8] / 10.0   # Fields below this line differs from original code, this now works on Aidon 6534
+            fields['il3'] = data[9] / 10.0
+            fields['ul1'] = data[10] / 10.0
+            fields['ul2'] = data[11] / 10.0
+            fields['ul3'] = data[12] / 10.0
 
-		elif (self.state == ESCAPED):
-			self.pkt += chr(ord(c) ^ 0x20)
-			self.state = DATA
+            if len(data) == OBJECTS_1HOUR:
+                fields['datetime'] = data[13]  # maybe?
+                # Tried to decode datetime, never finished this part as I didn't need it...
+                # https://www.scadacore.com/tools/programming-calculators/online-hex-converter/
+                # output at 2021-02-28 12:00:00
+                # datetime = \x07\xe5\x02\x1c\x00\x0c\x00\x00\xff\x00\x00\x00
+                # UINT32 - Mid-Little Endian (CDAB)
+                # 07 e5 = 2021
+                # UINT32 - Little Endian (DCBA)
+                # 02 = 2 // 1c = 28
+                # 00 = spacer?
+                # 0c = 12 // 00 = 0 // 00 = 0
+                # ff 00 00 00 = garbage?
+                fields['energy_act_in'] = data[14] / 100.0      # Fields differ from original code
+                fields['energy_act_out'] = data[15] / 100.0
+                fields['energy_react_in'] = data[16] / 100.0
+                fields['energy_react_out'] = data[17] / 100.0
 
+        self.callback(fields)
+
+    # General HDLC decoder
+    def decode(self, c):
+        # Waiting for packet start
+        if self.state == WAITING:
+            # print "WAITING"
+            if c == FLAG:
+                self.state = DATA
+                self.pkt = ""
+
+        elif self.state == DATA:
+            # print "DATA"
+            if c == FLAG:
+                # Minimum length check
+                if len(self.pkt) >= 19:
+                    # Check CRC
+                    crc = self.crc_func(self.pkt[:-2])
+                    crc ^= 0xffff
+                    if crc == struct.unpack("<H", self.pkt[-2:])[0]:
+                        self.parse(self.pkt)
+                    else:
+                        # If CRC fails, print error message
+                        # On my meter readout I get a lot of CRC errors, but everything seems to work anyway
+                        # Some packets are lost due to this, not enough for me to bother to figure out why
+                        datetime_object = datetime.datetime.now()
+                        print(datetime_object)
+                        print "CRC Error"
+                        # Old error message, also prints pkt
+                        # print "#################"
+                        # print "### crc error ###"
+                        # print "#################"
+                        # print self.pkt
+                        # print "#################"
+                    self.pkt = ""
+            elif c == ESCAPE:
+                self.state = ESCAPED
+                # DEBUG
+                # print "ESCAPED 2"
+            else:
+		self.pkt += c
+
+        elif self.state == ESCAPED:
+                # DEBUG
+                # print "ESCAPED 1"
+                self.pkt += chr(ord(c) ^ 0x20)
+                self.state = DATA
